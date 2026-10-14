@@ -677,7 +677,7 @@ class AtlasTrimApp:
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument('--smoke-report')
     parser.add_argument('--verify-manifest')
     args = parser.parse_args()
@@ -702,7 +702,9 @@ if __name__ == '__main__':
         folder = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'AtlasTrim'
         folder.mkdir(parents=True, exist_ok=True)
         (folder / 'startup-error.log').write_text(detail, encoding='utf-8')
-        if '--smoke-report' not in sys.argv:
+        smoke_mode = any(argument == '--smoke-report' or argument.startswith('--smoke-report=')
+                         for argument in sys.argv[1:])
+        if not smoke_mode:
             try:
                 messagebox.showerror('AtlasTrim 启动失败', f'错误详情已保存到：{folder / "startup-error.log"}\n{detail}')
             except Exception:
