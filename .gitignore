@@ -1,0 +1,8 @@
+Origen/
+dist/
+build/
+.artifacts/
+__pycache__/
+*.pyc
+*.spec
+.venv/
