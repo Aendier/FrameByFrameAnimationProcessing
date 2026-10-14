@@ -31,11 +31,11 @@ def _wait(root, condition, seconds=30):
 def verify_runtime(report_path: Path, manifest_path=None):
     from atlas_trim import AtlasTrimApp
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8')) if manifest_path else {}
+    manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8-sig')) if manifest_path else {}
     report = {'status': 'running', 'frozen': bool(getattr(sys, 'frozen', False)), 'python': sys.version}
     report['module_paths'] = {'pillow': PIL.__file__, 'numpy': numpy.__file__, 'tkinter': tk.__file__}
     if report['frozen']:
-        bundle = Path(sys._MEIPASS)
+        bundle = Path(getattr(sys, '_MEIPASS'))
         assert all(Path(path).is_relative_to(bundle) for path in report['module_paths'].values())
     root = None
     def save():
@@ -72,9 +72,11 @@ def verify_runtime(report_path: Path, manifest_path=None):
             app.step(1)
             app.export(selected=True)
             _wait(root, lambda: app.last_report is not None and not app.busy)
-            assert app.last_report['counts'] == {'success': 1, 'skipped': 0, 'failed': 0}
+            completed, result = app.last_report, app.result
+            assert completed is not None and result is not None
+            assert completed['counts'] == {'success': 1, 'skipped': 0, 'failed': 0}
             report['gui'] = {'tk': root.tk.call('info', 'patchlevel'), 'files_scanned': len(app.entries),
-                             'preview_size': list(app.result.atlas.size), 'export': app.last_report['counts'],
+                             'preview_size': list(result.atlas.size), 'export': completed['counts'],
                              'status_text': app.status.get()}
             if manifest.get('screenshot'):
                 app.playing = False
@@ -82,9 +84,7 @@ def verify_runtime(report_path: Path, manifest_path=None):
                 root.update()
                 time.sleep(.3)
                 root.update()
-                box = (root.winfo_rootx(), root.winfo_rooty(),
-                       root.winfo_rootx() + root.winfo_width(), root.winfo_rooty() + root.winfo_height())
-                ImageGrab.grab(bbox=box).save(manifest['screenshot'])
+                ImageGrab.grab(window=int(root.wm_frame(), 0)).save(manifest['screenshot'])
             root.deiconify()
             root.geometry('1050x700')
             root.update()
@@ -93,13 +93,17 @@ def verify_runtime(report_path: Path, manifest_path=None):
             assert hint.winfo_height() >= hint.winfo_reqheight(), 'Mode instructions are clipped'
             assert hint_bottom <= hint.master.winfo_rooty() + hint.master.winfo_height()
             assert app.progress.winfo_rooty() + app.progress.winfo_height() <= root.winfo_rooty() + root.winfo_height()
+            assert min(canvas.winfo_height() for canvas in app.canvases) >= 100, 'Animation preview is too small'
+            app.toggle_log()
+            root.update()
+            assert app.log_area.winfo_ismapped()
+            app.toggle_log()
+            root.update()
             report['gui']['minimum_window_layout'] = 'passed'
             if manifest.get('screenshot'):
                 time.sleep(.2)
                 root.update()
-                box = (root.winfo_rootx(), root.winfo_rooty(),
-                       root.winfo_rootx() + root.winfo_width(), root.winfo_rooty() + root.winfo_height())
-                ImageGrab.grab(bbox=box).save(str(Path(manifest['screenshot']).with_name('interface_minimum.png')))
+                ImageGrab.grab(window=int(root.wm_frame(), 0)).save(str(Path(manifest['screenshot']).with_name('interface_minimum.png')))
             root.withdraw()
             app.close()
             root = None

@@ -50,6 +50,7 @@ class AtlasTrimApp:
         self.last_tick = time.monotonic()
         self.scale_updating = False
         self.last_report = None
+        self.log_visible = False
         self.controls = []
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
@@ -222,8 +223,10 @@ class AtlasTrimApp:
         ttk.Label(timeline, text='预览 FPS').pack(side='right', padx=7)
         self.slider = ttk.Scale(right, from_=0, to=1, command=self._seek)
         self.slider.grid(row=4, column=0, sticky='ew', pady=(0, 12))
-        ttk.Label(right, text='处理记录', style='Muted.TLabel').grid(row=5, column=0, sticky='w', pady=(0, 5))
+        self.log_toggle = ttk.Button(right, text='展开处理记录', command=self.toggle_log)
+        self.log_toggle.grid(row=5, column=0, sticky='w', pady=(0, 5))
         log_area = ttk.Frame(right)
+        self.log_area = log_area
         log_area.grid(row=6, column=0, sticky='ew')
         self.log = tk.Text(log_area, height=6, wrap='word', font=('Microsoft YaHei UI', 9),
                            relief='flat', background='white', foreground=INK, padx=8, pady=6, state='disabled')
@@ -231,6 +234,7 @@ class AtlasTrimApp:
         self.log.configure(yscrollcommand=log_scroll.set)
         self.log.pack(side='left', fill='both', expand=True)
         log_scroll.pack(side='right', fill='y')
+        log_area.grid_remove()
 
         bottom = ttk.Frame(shell)
         bottom.grid(row=4, column=0, sticky='ew', pady=(16, 0))
@@ -244,6 +248,14 @@ class AtlasTrimApp:
         self.progress = ttk.Progressbar(shell, mode='determinate')
         self.progress.grid(row=5, column=0, sticky='ew', pady=(12, 6))
         ttk.Label(shell, textvariable=self.status, style='Muted.TLabel', wraplength=1300).grid(row=6, column=0, sticky='w')
+
+    def toggle_log(self):
+        self.log_visible = not self.log_visible
+        if self.log_visible:
+            self.log_area.grid()
+        else:
+            self.log_area.grid_remove()
+        self.log_toggle.configure(text='收起处理记录' if self.log_visible else '展开处理记录')
 
     def _log(self, text: str):
         self.log.configure(state='normal')
@@ -496,7 +508,7 @@ class AtlasTrimApp:
     def _render(self):
         if not hasattr(self, 'canvases'):
             return
-        images = [None, None]
+        images: list[Image.Image | None] = [None, None]
         if self.result:
             images = [self.result.originals[self.frame_index], self.result.frames[self.frame_index]]
             self.frame_text.set(f'帧 {self.frame_index + 1} / {len(self.result.frames)}')
@@ -690,8 +702,9 @@ if __name__ == '__main__':
         folder = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'AtlasTrim'
         folder.mkdir(parents=True, exist_ok=True)
         (folder / 'startup-error.log').write_text(detail, encoding='utf-8')
-        try:
-            messagebox.showerror('AtlasTrim 启动失败', f'错误详情已保存到：{folder / "startup-error.log"}\n{detail}')
-        except Exception:
-            pass
+        if '--smoke-report' not in sys.argv:
+            try:
+                messagebox.showerror('AtlasTrim 启动失败', f'错误详情已保存到：{folder / "startup-error.log"}\n{detail}')
+            except Exception:
+                pass
         raise

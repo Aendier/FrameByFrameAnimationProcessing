@@ -217,6 +217,7 @@ def process_atlas(path: str | Path, options: Options) -> ProcessedAtlas:
         source = image.convert('RGBA')
     width, height = source.size
     originals, original_offsets = _original_frames(source, options)
+    source_warnings: list[str] = []
     if options.resample:
         working, frame_width, frame_height, origin_x, origin_y = _resampled_frames(source, options)
         source_warnings = _source_edges(source, options)
