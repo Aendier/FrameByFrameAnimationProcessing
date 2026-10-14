@@ -9,6 +9,8 @@ import time
 import traceback
 from pathlib import Path
 import tkinter as tk
+import PIL
+import numpy
 
 from PIL import Image, ImageGrab
 
@@ -31,6 +33,10 @@ def verify_runtime(report_path: Path, manifest_path=None):
     report_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8')) if manifest_path else {}
     report = {'status': 'running', 'frozen': bool(getattr(sys, 'frozen', False)), 'python': sys.version}
+    report['module_paths'] = {'pillow': PIL.__file__, 'numpy': numpy.__file__, 'tkinter': tk.__file__}
+    if report['frozen']:
+        bundle = Path(sys._MEIPASS)
+        assert all(Path(path).is_relative_to(bundle) for path in report['module_paths'].values())
     root = None
     def save():
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -80,7 +86,7 @@ def verify_runtime(report_path: Path, manifest_path=None):
                        root.winfo_rootx() + root.winfo_width(), root.winfo_rooty() + root.winfo_height())
                 ImageGrab.grab(bbox=box).save(manifest['screenshot'])
                 root.withdraw()
-            root.destroy()
+            app.close()
             root = None
             save()
             for case in manifest.get('cases', []):

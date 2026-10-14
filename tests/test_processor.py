@@ -10,6 +10,24 @@ from atlas_processor import Options, ProcessingSkipped, process_atlas
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_border_sampling_keeps_full_motion_support_and_raw_reference(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'border.png'
+            image = Image.new('RGBA', (14, 4))
+            image.putpixel((3, 1), (250, 80, 20, 255))
+            image.putpixel((10, 3), (250, 80, 20, 255))
+            image.save(path)
+            result = process_atlas(path, Options(columns=2, rows=1, keep_center=True, resample=True))
+            centers, totals = [], []
+            for frame in result.frames:
+                rows = [sum(frame.getpixel((x, y))[3] for x in range(frame.width)) for y in range(frame.height)]
+                totals.append(sum(rows))
+                centers.append(sum((y + .5) * value for y, value in enumerate(rows)) / sum(rows))
+            self.assertAlmostEqual(centers[1] - centers[0], 2.0, places=6)
+            self.assertEqual(totals[0], totals[1])
+            self.assertTrue(result.warnings)
+            self.assertEqual(result.originals[0].getpixel((3, 1)), (250, 80, 20, 255))
+
     def test_fractional_grid_keeps_last_frame_and_ignores_hidden_rgb(self):
         with tempfile.TemporaryDirectory() as folder:
             paths = []

@@ -53,6 +53,7 @@ class CropPlan:
 class ProcessedAtlas:
     atlas: Image.Image
     originals: list[Image.Image]
+    original_offsets: list[tuple[float, float]]
     frames: list[Image.Image]
     plan: CropPlan
     source_size: tuple[int, int]
@@ -78,6 +79,42 @@ def has_transparency(image: Image.Image) -> bool:
     return 'A' in image.getbands() or 'transparency' in image.info
 
 
+def _original_frames(source: Image.Image, options: Options):
+    width, height = source.width / options.columns, source.height / options.rows
+    originals, offsets = [], []
+    for row in range(options.rows):
+        for column in range(options.columns):
+            x, y = column * width, row * height
+            left, top = math.floor(x), math.floor(y)
+            originals.append(source.crop((left, top, math.ceil(x + width), math.ceil(y + height))))
+            offsets.append((left - x, top - y))
+    return originals, offsets
+
+
+def _edge_warning(edges: list[int]) -> list[str]:
+    if not edges:
+        return []
+    detail = '、'.join(map(str, edges[:8])) + ('…' if len(edges) > 8 else '')
+    return [f'第{detail}帧内容触及原格边缘；源图已缺失的内容无法恢复']
+
+
+def _source_edges(source: Image.Image, options: Options) -> list[str]:
+    width, height = source.width / options.columns, source.height / options.rows
+    alpha = source.getchannel('A')
+    lut = [255 if value > options.threshold else 0 for value in range(256)]
+    edges = []
+    for row in range(options.rows):
+        for column in range(options.columns):
+            # Exactly the donor pixels owned by this continuous cell.
+            left, top = math.ceil(column * width - .5), math.ceil(row * height - .5)
+            right, bottom = math.ceil((column + 1) * width - .5), math.ceil((row + 1) * height - .5)
+            owned = alpha.crop((left, top, right, bottom))
+            box = owned.point(lut).getbbox()
+            if box and (box[0] == 0 or box[1] == 0 or box[2] == owned.width or box[3] == owned.height):
+                edges.append(row * options.columns + column + 1)
+    return _edge_warning(edges)
+
+
 def _resampled_frames(source: Image.Image, options: Options):
     """A shared unit-pixel lattice, centered on each continuous source cell.
 
@@ -87,7 +124,9 @@ def _resampled_frames(source: Image.Image, options: Options):
     """
     width = source.width / options.columns
     height = source.height / options.rows
-    side = math.ceil(max(width, height))
+    # One lattice pixel on each side keeps the complete bilinear support,
+    # including valid tails outside a cell's geometric edge.
+    side = math.ceil(max(width, height)) + 2
     if side * side * options.columns * options.rows > MAX_OUTPUT_PIXELS:
         raise ProcessingSkipped('size', '重采样工作画布超过6400万像素；请检查网格')
     origin_x, origin_y = (width - side) / 2, (height - side) / 2
@@ -101,20 +140,18 @@ def _resampled_frames(source: Image.Image, options: Options):
             ix = np.floor(x - 0.5).astype(np.int64)
             iy = np.floor(y - 0.5).astype(np.int64)
             fx, fy = x - 0.5 - ix, y - 0.5 - iy
-            inside_x = (x >= cell_x) & (x < cell_x + width)
-            inside_y = (y >= cell_y) & (y < cell_y + height)
             summed = np.zeros((side, side, 4), dtype=np.float32)
             for offset_y, weight_y in [(0, 1 - fy), (1, fy)]:
                 donor_y = iy + offset_y
                 valid_y = ((donor_y >= 0) & (donor_y < source.height) &
                            (donor_y + 0.5 >= cell_y) &
-                           (donor_y + 0.5 < cell_y + height) & inside_y)
+                           (donor_y + 0.5 < cell_y + height))
                 weight_y = np.where(valid_y, weight_y, 0)
                 for offset_x, weight_x in [(0, 1 - fx), (1, fx)]:
                     donor_x = ix + offset_x
                     valid_x = ((donor_x >= 0) & (donor_x < source.width) &
                                (donor_x + 0.5 >= cell_x) &
-                               (donor_x + 0.5 < cell_x + width) & inside_x)
+                               (donor_x + 0.5 < cell_x + width))
                     weight_x = np.where(valid_x, weight_x, 0)
                     samples = pixels[np.ix_(np.clip(donor_y, 0, source.height - 1),
                                             np.clip(donor_x, 0, source.width - 1))].astype(np.float32)
@@ -165,11 +202,7 @@ def _crop_frames(frames: list[Image.Image], options: Options,
     result = [frame.crop(box) for frame in frames]
     plan = CropPlan(width, height, crop_x + origin_x, crop_y + origin_y,
                     side, options.columns, options.rows)
-    warnings = []
-    if edges:
-        detail = '、'.join(map(str, edges[:8])) + ('…' if len(edges) > 8 else '')
-        warnings.append(f'第{detail}帧内容触及原格边缘；源图已缺失的内容无法恢复')
-    return result, plan, warnings
+    return result, plan, _edge_warning(edges)
 
 
 def process_atlas(path: str | Path, options: Options) -> ProcessedAtlas:
@@ -183,20 +216,23 @@ def process_atlas(path: str | Path, options: Options) -> ProcessedAtlas:
         metadata = dict(image.info)
         source = image.convert('RGBA')
     width, height = source.size
+    originals, original_offsets = _original_frames(source, options)
     if options.resample:
-        originals, frame_width, frame_height, origin_x, origin_y = _resampled_frames(source, options)
+        working, frame_width, frame_height, origin_x, origin_y = _resampled_frames(source, options)
+        source_warnings = _source_edges(source, options)
     else:
         frame_width = width // options.columns
         frame_height = height // options.rows
-        originals = [source.crop((column * frame_width, row * frame_height,
-                                  (column + 1) * frame_width, (row + 1) * frame_height))
-                     for row in range(options.rows) for column in range(options.columns)]
+        working = originals
         origin_x = origin_y = 0
     source.close()
-    frames, plan, warnings = _crop_frames(originals, options, frame_width, frame_height,
+    frames, plan, warnings = _crop_frames(working, options, frame_width, frame_height,
                                          origin_x, origin_y)
+    if options.resample:
+        warnings = source_warnings
     atlas = Image.new('RGBA', (plan.side * options.columns, plan.side * options.rows))
     for index, frame in enumerate(frames):
         atlas.paste(frame, ((index % options.columns) * plan.side,
                             (index // options.columns) * plan.side))
-    return ProcessedAtlas(atlas, originals, frames, plan, (width, height), warnings, metadata)
+    return ProcessedAtlas(atlas, originals, original_offsets, frames, plan,
+                          (width, height), warnings, metadata)

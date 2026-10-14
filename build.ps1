@@ -1,4 +1,5 @@
-param([string]$PythonPath = 'python')
+﻿param([string]$PythonPath = 'python')
+# Keep this file UTF-8 with BOM for Windows PowerShell 5.1.
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 & $PythonPath -I -X utf8 scripts/build_assets.py

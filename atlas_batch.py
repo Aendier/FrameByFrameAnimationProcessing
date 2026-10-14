@@ -14,6 +14,8 @@ from PIL import Image, PngImagePlugin
 
 from atlas_processor import Options, ProcessingSkipped, has_transparency, process_atlas
 
+STATUS_LABELS = {'success': '成功', 'skipped': '跳过', 'failed': '失败'}
+
 
 @dataclass(frozen=True)
 class FileEntry:
@@ -114,8 +116,12 @@ def export_batch(jobs: list[Job], input_folder: str | Path, output_folder: str |
         try:
             # Derive the target from the actual source, never from an unchecked relative name.
             relative = job.path.resolve().relative_to(source)
+            destination = target / relative
+            actual_parent = destination.parent.resolve()
+            if actual_parent != target and target not in actual_parent.parents:
+                raise ProcessingSkipped('output_path', '输出子目录链接指向输出目录之外，已跳过')
             result = process_atlas(job.path, job.options)
-            output = _save_png(result, target / relative)
+            output = _save_png(result, destination)
             record.update(status='success', output=str(output), reason='',
                           source_size=list(result.source_size), output_size=list(result.atlas.size),
                           crop=asdict(result.plan), warnings=result.warnings)
@@ -132,22 +138,44 @@ def export_batch(jobs: list[Job], input_folder: str | Path, output_folder: str |
               'input_folder': str(source), 'output_folder': str(target),
               'counts': counts, 'total_requested': len(jobs),
               'cancelled': len(records) < len(jobs), 'results': records}
-    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    json_path, stream = _exclusive_file(target / f'处理清单_{stamp}.json')
-    report['report_path'] = str(json_path)
-    with stream:
-        stream.write(json.dumps(report, ensure_ascii=False, indent=2).encode('utf-8'))
-    csv_path, csv_stream = _exclusive_file(target / f'处理清单_{stamp}.csv')
-    with csv_stream:
-        import io
-        text_stream = io.TextIOWrapper(csv_stream, encoding='utf-8-sig', newline='')
-        writer = csv.writer(text_stream)
-        writer.writerow(['输入', '状态', '输出', '原因', '警告'])
-        labels = {'success': '成功', 'skipped': '跳过', 'failed': '失败'}
-        for record in records:
-            writer.writerow([record['input'], labels[record['status']], record.get('output', ''),
-                             record['reason'], '；'.join(record['warnings'])])
-        text_stream.flush()
-        text_stream.detach()
-    report['csv_path'] = str(csv_path)
+    report.update(report_path='', csv_path='', report_errors=[])
+    _write_reports(report, target)
     return report
+
+
+def _write_reports(report: dict, target: Path) -> None:
+    """Image completion remains known even when a summary cannot be saved."""
+    import io
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    csv_path = None
+    try:
+        csv_path, stream = _exclusive_file(target / f'处理清单_{stamp}.csv')
+        with stream, io.TextIOWrapper(stream, encoding='utf-8-sig', newline='') as text_stream:
+            writer = csv.writer(text_stream)
+            writer.writerow(['输入', '状态', '输出', '原因', '警告'])
+            for record in report['results']:
+                writer.writerow([record['input'], STATUS_LABELS[record['status']], record.get('output', ''),
+                                 record['reason'], '；'.join(record['warnings'])])
+        report['csv_path'] = str(csv_path)
+    except Exception as error:
+        if csv_path:
+            _discard_partial(csv_path, report)
+        report['report_errors'].append(f'CSV清单未保存：{error}')
+    json_path = None
+    try:
+        json_path, stream = _exclusive_file(target / f'处理清单_{stamp}.json')
+        report['report_path'] = str(json_path)
+        with stream:
+            stream.write(json.dumps(report, ensure_ascii=False, indent=2).encode('utf-8'))
+    except Exception as error:
+        if json_path:
+            _discard_partial(json_path, report)
+        report['report_path'] = ''
+        report['report_errors'].append(f'JSON清单未保存：{error}')
+
+
+def _discard_partial(path: Path, report: dict) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as error:
+        report['report_errors'].append(f'未能清理不完整清单 {path}：{error}')

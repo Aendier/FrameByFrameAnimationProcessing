@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw, ImageTk
 if not getattr(sys, 'frozen', False):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from atlas_batch import FileEntry, Job, export_batch, scan_folder, validate_output
+from atlas_batch import STATUS_LABELS, FileEntry, Job, export_batch, scan_folder, validate_output
 from atlas_processor import Options, ProcessedAtlas, ProcessingSkipped, check_geometry, process_atlas
 
 STRICT = '严格 · 保留原像素'
@@ -32,6 +32,8 @@ class AtlasTrimApp:
     def __init__(self, root: tk.Tk, autodetect: bool = True):
         self.root = root
         self.events = queue.Queue()
+        self.preview_requests = queue.Queue(maxsize=1)
+        self.preview_closed = threading.Event()
         self.entries: list[FileEntry] = []
         self.grids: dict[str, tuple[int, int]] = {}
         self.scanned_root: Path | None = None
@@ -59,12 +61,15 @@ class AtlasTrimApp:
         self.keep_center = tk.BooleanVar(value=False)
         self.mode = tk.StringVar(value=STRICT)
         self.fps = tk.StringVar(value='12')
+        self.zoom = tk.StringVar(value='适应窗口')
         self.status = tk.StringVar(value='选择输入文件夹，扫描后设置每张图集的网格。')
         self.summary = tk.StringVar(value='尚未扫描')
         self.preview_name = tk.StringVar(value='同步动画预览')
         self.plan_text = tk.StringVar(value='所有帧使用统一裁剪区域；默认严格模式。')
         self.frame_text = tk.StringVar(value='帧 — / —')
         self._build()
+        threading.Thread(target=self._preview_loop, daemon=True).start()
+        self.zoom.trace_add('write', lambda *_: self._render())
         for variable in (self.padding, self.threshold, self.keep_center, self.mode):
             variable.trace_add('write', self._parameters_changed)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -192,7 +197,8 @@ class AtlasTrimApp:
         previews.columnconfigure(0, weight=1, uniform='preview')
         previews.columnconfigure(1, weight=1, uniform='preview')
         previews.rowconfigure(1, weight=1)
-        ttk.Label(previews, text='原始帧', style='Muted.TLabel').grid(row=0, column=0, pady=(0, 7))
+        self.original_label = ttk.Label(previews, text='原始帧', style='Muted.TLabel')
+        self.original_label.grid(row=0, column=0, pady=(0, 7))
         ttk.Label(previews, text='处理后', style='Muted.TLabel').grid(row=0, column=1, pady=(0, 7))
         self.canvases = [tk.Canvas(previews, bg='#e7ebf0', highlightthickness=0, width=230, height=270)
                          for _ in range(2)]
@@ -207,6 +213,8 @@ class AtlasTrimApp:
         ttk.Button(timeline, text='‹', command=lambda: self.step(-1), width=2).pack(side='left', padx=(7, 3))
         ttk.Button(timeline, text='›', command=lambda: self.step(1), width=2).pack(side='left')
         ttk.Label(timeline, textvariable=self.frame_text).pack(side='left', padx=12)
+        ttk.Combobox(timeline, textvariable=self.zoom, values=('适应窗口', '100%', '200%'),
+                     state='readonly', width=8).pack(side='left')
         ttk.Spinbox(timeline, from_=1, to=60, width=4, textvariable=self.fps).pack(side='right')
         ttk.Label(timeline, text='预览 FPS').pack(side='right', padx=7)
         self.slider = ttk.Scale(right, from_=0, to=1, command=self._seek)
@@ -397,7 +405,19 @@ class AtlasTrimApp:
             return
         self.plan_text.set('正在计算统一裁剪区域…')
         self._render()
-        def work():
+        request = (generation, entry, options)
+        try:
+            self.preview_requests.get_nowait()
+        except queue.Empty:
+            pass
+        self.preview_requests.put_nowait(request)
+
+    def _preview_loop(self):
+        while not self.preview_closed.is_set():
+            request = self.preview_requests.get()
+            if request is None:
+                return
+            generation, entry, options = request
             try:
                 result = process_atlas(entry.path, options)
                 self.events.put(('preview', (generation, result, None, '')))
@@ -410,7 +430,6 @@ class AtlasTrimApp:
                 except Exception:
                     pass
                 self.events.put(('preview', (generation, None, fallback, str(error))))
-        threading.Thread(target=work, daemon=True).start()
 
     def _preview_done(self, generation, result, fallback, reason):
         if generation != self.generation:
@@ -419,6 +438,7 @@ class AtlasTrimApp:
         self.frame_index = 0
         self.last_tick = time.monotonic()
         if result:
+            self.original_label.configure(text='源像素参考' if self.mode.get() == RESAMPLE else '原始帧')
             plan = result.plan
             mode = '重采样' if self.mode.get() == RESAMPLE else '严格复制'
             self.plan_text.set(f'原帧 {plan.frame_width:g}×{plan.frame_height:g}  →  方形帧 {plan.side}×{plan.side}\n'
@@ -428,6 +448,7 @@ class AtlasTrimApp:
             self.playing = True
             self.play_button.configure(text='暂停')
         else:
+            self.original_label.configure(text='源图集')
             self.plan_text.set('当前设置无法导出：' + reason)
             self.frame_text.set('原图集总览（无法逐帧预览）')
         self._render()
@@ -483,8 +504,13 @@ class AtlasTrimApp:
             images[0] = self.fallback
         sizes = [(max(10, canvas.winfo_width()), max(10, canvas.winfo_height())) for canvas in self.canvases]
         present = [image for image in images if image is not None]
-        zoom = min(1.0, min((width - 24) / max(image.width for image in present) for width, _ in sizes),
-                   min((height - 24) / max(image.height for image in present) for _, height in sizes)) if present else 1
+        # A constant zoom over the entire animation, even when fractional cell
+        # bounds give the raw reference frames different integer ROI sizes.
+        references = (self.result.originals + self.result.frames) if self.result else present
+        zoom = min(1.0, min((width - 24) / max(image.width for image in references) for width, _ in sizes),
+                   min((height - 24) / max(image.height for image in references) for _, height in sizes)) if references else 1
+        if self.zoom.get() != '适应窗口':
+            zoom = 1 if self.zoom.get() == '100%' else 2
         zoom = max(0.01, zoom)
         photos = []
         for index, (canvas, (width, height), image) in enumerate(zip(self.canvases, sizes, images)):
@@ -497,10 +523,20 @@ class AtlasTrimApp:
             draw.line((width // 2, 0, width // 2, height), fill='#cbd3df')
             draw.line((0, height // 2, width, height // 2), fill='#cbd3df')
             if image:
-                scaled = image.resize((max(1, round(image.width * zoom)), max(1, round(image.height * zoom))), Image.Resampling.LANCZOS)
-                x, y = (width - scaled.width) // 2, (height - scaled.height) // 2
-                background.alpha_composite(scaled, (x, y))
-                ImageDraw.Draw(background).rectangle((x, y, x + scaled.width - 1, y + scaled.height - 1), outline='#94a3b8')
+                box_width, box_height = image.width, image.height
+                x, y = (width - image.width * zoom) / 2, (height - image.height * zoom) / 2
+                if index == 0 and self.result:
+                    plan = self.result.plan
+                    offset_x, offset_y = self.result.original_offsets[self.frame_index]
+                    x = width / 2 + (offset_x - plan.frame_width / 2) * zoom
+                    y = height / 2 + (offset_y - plan.frame_height / 2) * zoom
+                    box_width, box_height = plan.frame_width, plan.frame_height
+                view = image.transform((width, height), Image.Transform.AFFINE,
+                                       (1 / zoom, 0, -x / zoom, 0, 1 / zoom, -y / zoom),
+                                       Image.Resampling.NEAREST if zoom >= 1 else Image.Resampling.BILINEAR)
+                background.alpha_composite(view)
+                ImageDraw.Draw(background).rectangle(((width - box_width * zoom) / 2, (height - box_height * zoom) / 2,
+                                                     (width + box_width * zoom) / 2, (height + box_height * zoom) / 2), outline='#94a3b8')
             photo = ImageTk.PhotoImage(background)
             photos.append(photo)
             canvas.delete('all')
@@ -558,7 +594,7 @@ class AtlasTrimApp:
                     self._preview_done(*data)
                 elif kind == 'batch_item':
                     index, record = data
-                    label = {'success': '成功', 'skipped': '跳过', 'failed': '失败'}[record['status']]
+                    label = STATUS_LABELS[record['status']]
                     for entry_index, entry in enumerate(self.entries):
                         if str(entry.path) == record['input']:
                             self.tree.set(str(entry_index), 'status', label)
@@ -573,13 +609,16 @@ class AtlasTrimApp:
                 elif kind == 'batch_done':
                     self._set_busy('')
                     self.last_report = data
-                    self.report_button.configure(state='normal')
+                    self.report_button.configure(state='normal' if data['csv_path'] else 'disabled')
                     counts = data['counts']
                     state = '已停止' if data['cancelled'] else '导出完成'
-                    self.status.set(f'{state}：成功 {counts["success"]} · 跳过 {counts["skipped"]} · 失败 {counts["failed"]}。处理清单已保存。')
+                    suffix = '部分清单未保存，详情见处理记录。' if data['report_errors'] else '处理清单已保存。'
+                    self.status.set(f'{state}：成功 {counts["success"]} · 跳过 {counts["skipped"]} · 失败 {counts["failed"]}。' + suffix)
                     self._log(self.status.get())
+                    for error in data['report_errors']:
+                        self._log(error)
                     if self.closing:
-                        self.root.destroy()
+                        self._destroy()
                         return
                 elif kind == 'error':
                     self.progress.stop()
@@ -587,7 +626,7 @@ class AtlasTrimApp:
                     self.status.set('操作失败：' + data)
                     self._log(self.status.get())
                     if self.closing:
-                        self.root.destroy()
+                        self._destroy()
                         return
         except queue.Empty:
             pass
@@ -601,8 +640,17 @@ class AtlasTrimApp:
             messagebox.showinfo('输出文件夹', '输出文件夹尚未创建，导出时会自动创建')
 
     def open_report(self):
-        if self.last_report:
+        if self.last_report and self.last_report['csv_path']:
             os.startfile(self.last_report['csv_path'])
+
+    def _destroy(self):
+        self.preview_closed.set()
+        try:
+            self.preview_requests.get_nowait()
+        except queue.Empty:
+            pass
+        self.preview_requests.put_nowait(None)
+        self.root.destroy()
 
     def close(self):
         if self.busy == 'export':
@@ -610,7 +658,7 @@ class AtlasTrimApp:
                 self.closing = True
                 self.stop_export()
         else:
-            self.root.destroy()
+            self._destroy()
 
 
 def main():
