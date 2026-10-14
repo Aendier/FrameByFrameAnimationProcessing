@@ -85,7 +85,22 @@ def verify_runtime(report_path: Path, manifest_path=None):
                 box = (root.winfo_rootx(), root.winfo_rooty(),
                        root.winfo_rootx() + root.winfo_width(), root.winfo_rooty() + root.winfo_height())
                 ImageGrab.grab(bbox=box).save(manifest['screenshot'])
-                root.withdraw()
+            root.deiconify()
+            root.geometry('1050x700')
+            root.update()
+            hint = app.mode_hint
+            hint_bottom = hint.winfo_rooty() + hint.winfo_height()
+            assert hint.winfo_height() >= hint.winfo_reqheight(), 'Mode instructions are clipped'
+            assert hint_bottom <= hint.master.winfo_rooty() + hint.master.winfo_height()
+            assert app.progress.winfo_rooty() + app.progress.winfo_height() <= root.winfo_rooty() + root.winfo_height()
+            report['gui']['minimum_window_layout'] = 'passed'
+            if manifest.get('screenshot'):
+                time.sleep(.2)
+                root.update()
+                box = (root.winfo_rootx(), root.winfo_rooty(),
+                       root.winfo_rootx() + root.winfo_width(), root.winfo_rooty() + root.winfo_height())
+                ImageGrab.grab(bbox=box).save(str(Path(manifest['screenshot']).with_name('interface_minimum.png')))
+            root.withdraw()
             app.close()
             root = None
             save()
