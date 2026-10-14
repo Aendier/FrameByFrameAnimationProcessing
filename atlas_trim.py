@@ -704,9 +704,11 @@ if __name__ == '__main__':
         (folder / 'startup-error.log').write_text(detail, encoding='utf-8')
         smoke_mode = any(argument == '--smoke-report' or argument.startswith('--smoke-report=')
                          for argument in sys.argv[1:])
+        if sys.stderr is not None:
+            print(detail, file=sys.stderr)
         if not smoke_mode:
             try:
                 messagebox.showerror('AtlasTrim 启动失败', f'错误详情已保存到：{folder / "startup-error.log"}\n{detail}')
             except Exception:
                 pass
-        raise
+        raise SystemExit(1) from None
