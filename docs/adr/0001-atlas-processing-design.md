@@ -1,6 +1,6 @@
 # ADR 0001：序列帧图集裁剪工具的初版设计
 
-- 状态：Accepted
+- 状态：Superseded（输出缩放约定由 [ADR 0002](0002-uniform-atlas-size.md) 替代；未开启统一尺寸时本条算法仍适用）
 - 确认日期：2026-10-14，Asia/Shanghai
 - 来源：用户通过 grill-me / grilling 逐轮确认，最终确认保存方案。
 - 本轮交付：确认并保存需求；后续开发可运行的 Windows EXE。

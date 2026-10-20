@@ -124,6 +124,8 @@ def export_batch(jobs: list[Job], input_folder: str | Path, output_folder: str |
             output = _save_png(result, destination)
             record.update(status='success', output=str(output), reason='',
                           source_size=list(result.source_size), output_size=list(result.atlas.size),
+                          output_frame_size=list(result.output_frame_size),
+                          output_scale=list(result.output_scale),
                           crop=asdict(result.plan), warnings=result.warnings)
             del result
         except ProcessingSkipped as error:

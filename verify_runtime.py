@@ -29,7 +29,7 @@ def _wait(root, condition, seconds=30):
 
 
 def verify_runtime(report_path: Path, manifest_path=None):
-    from atlas_trim import AtlasTrimApp
+    from atlas_trim import AtlasTrimApp, PIXEL, RESAMPLE, SMOOTH
     report_path.parent.mkdir(parents=True, exist_ok=True)
     manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8-sig')) if manifest_path else {}
     report = {'status': 'running', 'frozen': bool(getattr(sys, 'frozen', False)), 'python': sys.version}
@@ -78,6 +78,68 @@ def verify_runtime(report_path: Path, manifest_path=None):
             report['gui'] = {'tk': root.tk.call('info', 'patchlevel'), 'files_scanned': len(app.entries),
                              'preview_size': list(result.atlas.size), 'export': completed['counts'],
                              'status_text': app.status.get()}
+            assert str(app.width_spin.cget('state')) == 'disabled'
+            assert str(app.resize_combo.cget('state')) == 'disabled'
+            app.target_width.set('')
+            app.target_height.set('')
+            assert not app._options(key).uniform_size, 'Disabled dimensions must be ignored'
+
+            uniform_name = manifest.get('gui_uniform_selected', name)
+            uniform_key = next(str(index) for index, entry in enumerate(app.entries) if entry.path.name == uniform_name)
+            uniform_columns, uniform_rows = manifest.get('gui_uniform_grid', [columns, rows])
+            app.tree.selection_set(uniform_key)
+            app.tree.focus(uniform_key)
+            app.tree.see(uniform_key)
+            app.columns.set(str(uniform_columns))
+            app.rows.set(str(uniform_rows))
+            app.mode.set(RESAMPLE)
+            app.apply_grid()
+            app.target_width.set('1024')
+            app.target_height.set('1024')
+            app.uniform_size.set(True)
+            _wait(root, lambda: app.result is not None and app.result.atlas.size == (1024, 1024))
+            assert str(app.width_spin.cget('state')) == 'normal'
+            assert str(app.resize_combo.cget('state')) == 'readonly'
+            app.step(1)
+            app.step(-1)
+            app.last_report = None
+            app.output_path.set(str(report_path.parent / 'gui_uniform_output'))
+            app.export(selected=True)
+            _wait(root, lambda: app.last_report is not None and not app.busy)
+            completed, result = app.last_report, app.result
+            assert completed is not None and result is not None
+            assert completed['counts'] == {'success': 1, 'skipped': 0, 'failed': 0}
+            with Image.open(completed['results'][0]['output']) as exported_image:
+                assert exported_image.size == (1024, 1024)
+                assert exported_image.tobytes() == result.atlas.tobytes(), 'Preview and output differ'
+            report['uniform_gui'] = {'preview_size': list(result.atlas.size),
+                                     'logical_frame_size': list(result.output_frame_size),
+                                     'preview_export_pixels_equal': True, 'smooth_export': completed['counts']}
+
+            app.target_height.set('512')
+            app.resize_mode.set(PIXEL)
+            _wait(root, lambda: app.result is not None and app.result.atlas.size == (512, 512))
+            app.last_report = None
+            app.export(selected=True)
+            _wait(root, lambda: app.last_report is not None and not app.busy)
+            completed, result = app.last_report, app.result
+            assert completed is not None and result is not None
+            assert completed['counts'] == {'success': 1, 'skipped': 0, 'failed': 0}
+            assert completed['results'][0]['options']['resize_filter'] == 'nearest'
+            with Image.open(completed['results'][0]['output']) as exported_image:
+                assert exported_image.tobytes() == result.atlas.tobytes()
+            report['uniform_gui']['pixel_export'] = {'size': list(result.atlas.size), 'pixels_equal': True}
+
+            unscaled_size = (result.plan.side * uniform_columns, result.plan.side * uniform_rows)
+            app.uniform_size.set(False)
+            _wait(root, lambda: app.result is not None and app.result.atlas.size == unscaled_size)
+            assert app.result is not None and app.result.output_scale == (1, 1)
+            assert str(app.width_spin.cget('state')) == 'disabled'
+            report['uniform_gui']['toggle_off_restores_unscaled'] = True
+            app.target_height.set('1024')
+            app.resize_mode.set(SMOOTH)
+            app.uniform_size.set(True)
+            _wait(root, lambda: app.result is not None and app.result.atlas.size == (1024, 1024))
             if manifest.get('screenshot'):
                 app.playing = False
                 root.deiconify()
@@ -94,6 +156,8 @@ def verify_runtime(report_path: Path, manifest_path=None):
             assert hint_bottom <= hint.master.winfo_rooty() + hint.master.winfo_height()
             assert app.progress.winfo_rooty() + app.progress.winfo_height() <= root.winfo_rooty() + root.winfo_height()
             assert min(canvas.winfo_height() for canvas in app.canvases) >= 100, 'Animation preview is too small'
+            assert app.tree.winfo_height() >= 100, 'File list has no usable rows'
+            assert app.height_spin.winfo_rootx() + app.height_spin.winfo_width() <= app.height_spin.master.winfo_rootx() + app.height_spin.master.winfo_width(), 'Uniform size controls are clipped'
             app.toggle_log()
             root.update()
             assert app.log_area.winfo_ismapped()
@@ -120,7 +184,14 @@ def verify_runtime(report_path: Path, manifest_path=None):
                             assert result.mode == 'RGBA'
                             assert list(result.size) == item['output_size']
                             columns, rows = item['options']['columns'], item['options']['rows']
-                            assert result.width // columns == result.height // rows
+                            if item['options'].get('uniform_size'):
+                                expected = ([1024, 1024] if columns == rows else
+                                            [1024, 768] if (columns, rows) == (4, 3) else [1024, 853])
+                                assert list(result.size) == expected, result.size
+                                assert item['output_frame_size'] == [result.width / columns, result.height / rows]
+                            else:
+                                assert result.width % columns == result.height % rows == 0
+                                assert result.width // columns == result.height // rows
                             if case['name'] == 'strict' and expected_size:
                                 assert list(result.size) == expected_size, result.size
                 report[case['name']] = {'counts': exported['counts'], 'seconds': round(time.monotonic() - started, 2),

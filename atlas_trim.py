@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import math
 import os
 import queue
 import sys
@@ -20,8 +21,10 @@ if not getattr(sys, 'frozen', False):
 from atlas_batch import STATUS_LABELS, FileEntry, Job, export_batch, scan_folder, validate_output
 from atlas_processor import Options, ProcessedAtlas, ProcessingSkipped, check_geometry, process_atlas
 
-STRICT = '严格 · 保留原像素'
+STRICT = '严格 · 整数裁剪'
 RESAMPLE = '重采样 · 亚像素对齐'
+SMOOTH = '平滑'
+PIXEL = '像素'
 BG = '#f4f6f9'
 INK = '#1e293b'
 MUTED = '#64748b'
@@ -61,6 +64,10 @@ class AtlasTrimApp:
         self.threshold = tk.StringVar(value='0')
         self.keep_center = tk.BooleanVar(value=False)
         self.mode = tk.StringVar(value=STRICT)
+        self.uniform_size = tk.BooleanVar(value=False)
+        self.target_width = tk.StringVar(value='1024')
+        self.target_height = tk.StringVar(value='1024')
+        self.resize_mode = tk.StringVar(value=SMOOTH)
         self.fps = tk.StringVar(value='12')
         self.zoom = tk.StringVar(value='适应窗口')
         self.status = tk.StringVar(value='选择输入文件夹，扫描后设置每张图集的网格。')
@@ -69,9 +76,11 @@ class AtlasTrimApp:
         self.plan_text = tk.StringVar(value='所有帧使用统一裁剪区域；默认严格模式。')
         self.frame_text = tk.StringVar(value='帧 — / —')
         self._build()
+        self._update_resize_controls()
         threading.Thread(target=self._preview_loop, daemon=True).start()
         self.zoom.trace_add('write', lambda *_: self._render())
-        for variable in (self.padding, self.threshold, self.keep_center, self.mode):
+        for variable in (self.padding, self.threshold, self.keep_center, self.mode,
+                         self.uniform_size, self.target_width, self.target_height, self.resize_mode):
             variable.trace_add('write', self._parameters_changed)
         root.protocol('WM_DELETE_WINDOW', self.close)
         root.after(40, self._poll)
@@ -119,16 +128,16 @@ class AtlasTrimApp:
         style.configure('TSpinbox', padding=4, fieldbackground='white')
         style.configure('TCombobox', padding=5)
 
-        shell = ttk.Frame(self.root, padding=20)
+        shell = ttk.Frame(self.root, padding=16)
         shell.pack(fill='both', expand=True)
         shell.columnconfigure(0, weight=1)
         shell.rowconfigure(3, weight=1)
         header = ttk.Frame(shell)
-        header.grid(row=0, column=0, sticky='ew', pady=(0, 14))
+        header.grid(row=0, column=0, sticky='ew', pady=(0, 8))
         ttk.Label(header, text='序列帧图集裁剪', style='Title.TLabel').pack(side='left')
-        ttk.Label(header, text='AtlasTrim  1.0', style='Muted.TLabel').pack(side='right')
+        ttk.Label(header, text='AtlasTrim  1.1', style='Muted.TLabel').pack(side='right')
         paths = ttk.Frame(shell)
-        paths.grid(row=1, column=0, sticky='ew', pady=(0, 12))
+        paths.grid(row=1, column=0, sticky='ew', pady=(0, 8))
         paths.columnconfigure(1, weight=1)
         for row, (label, variable, callback) in enumerate([
             ('输入文件夹', self.input_path, self.choose_input),
@@ -138,10 +147,10 @@ class AtlasTrimApp:
             self._control(ttk.Entry(paths, textvariable=variable)).grid(row=row, column=1, sticky='ew', pady=3)
             self._control(ttk.Button(paths, text='选择…', command=callback)).grid(row=row, column=2, padx=(8, 0), pady=3)
         tools = ttk.Frame(shell)
-        tools.grid(row=2, column=0, sticky='ew', pady=(0, 12))
+        tools.grid(row=2, column=0, sticky='ew', pady=(0, 8))
         self._control(ttk.Checkbutton(tools, text='包含子文件夹', variable=self.recursive)).pack(side='left')
         self._control(ttk.Button(tools, text='扫描 PNG', command=self.scan)).pack(side='left', padx=10)
-        ttk.Label(tools, text='只处理透明 PNG · 保持原格子顺序 · 不缩放主体', style='Muted.TLabel').pack(side='right')
+        ttk.Label(tools, text='透明 PNG · 统一裁剪 · 可选整图等比缩放', style='Muted.TLabel').pack(side='right')
 
         body = ttk.Panedwindow(shell, orient='horizontal')
         body.grid(row=3, column=0, sticky='nsew')
@@ -184,12 +193,27 @@ class AtlasTrimApp:
         self._control(ttk.Spinbox(params, from_=0, to=4096, width=5, textvariable=self.padding)).pack(side='left', padx=6)
         ttk.Label(params, text='px     alpha 阈值').pack(side='left')
         self._control(ttk.Spinbox(params, from_=0, to=255, width=5, textvariable=self.threshold)).pack(side='left', padx=6)
-        self._control(ttk.Checkbutton(left, text='保留原画布中心（可能留下更多透明边）', variable=self.keep_center)).grid(row=5, column=0, sticky='w')
+        self._control(ttk.Checkbutton(params, text='保留原画布中心', variable=self.keep_center)).pack(side='left', padx=(8, 0))
         sampling = ttk.Frame(left)
-        sampling.grid(row=6, column=0, sticky='ew', pady=(8, 0))
-        ttk.Label(sampling, text='采样模式').pack(side='left')
-        self._control(ttk.Combobox(sampling, textvariable=self.mode, values=(STRICT, RESAMPLE), state='readonly', width=23)).pack(side='left', padx=8)
-        self.mode_hint = ttk.Label(left, text='严格模式跳过非整除网格；重采样允许改变边缘像素。\n网格按文件设置，其余处理参数适用于全部文件。',
+        sampling.grid(row=5, column=0, sticky='ew', pady=(0, 0))
+        ttk.Label(sampling, text='裁剪采样').pack(side='left')
+        self._control(ttk.Combobox(sampling, textvariable=self.mode, values=(STRICT, RESAMPLE), state='readonly', width=20)).pack(side='left', padx=8)
+        ttk.Label(sampling, text='缩放').pack(side='left', padx=(4, 0))
+        self.resize_combo = self._control(ttk.Combobox(sampling, textvariable=self.resize_mode,
+                                                      values=(SMOOTH, PIXEL), state='readonly', width=5))
+        self.resize_combo.pack(side='left', padx=(6, 0))
+
+        sizing = ttk.Frame(left)
+        sizing.grid(row=6, column=0, sticky='ew', pady=(9, 0))
+        self._control(ttk.Checkbutton(sizing, text='统一尺寸', variable=self.uniform_size)).pack(side='left')
+        ttk.Label(sizing, text='最大宽').pack(side='left', padx=(8, 4))
+        self.width_spin = self._control(ttk.Spinbox(sizing, from_=1, to=16384, width=6, textvariable=self.target_width))
+        self.width_spin.pack(side='left')
+        ttk.Label(sizing, text='最大高').pack(side='left', padx=(8, 4))
+        self.height_spin = self._control(ttk.Spinbox(sizing, from_=1, to=16384, width=6, textvariable=self.target_height))
+        self.height_spin.pack(side='left')
+        self.resize_inputs = [(self.width_spin, 'normal'), (self.height_spin, 'normal'), (self.resize_combo, 'readonly')]
+        self.mode_hint = ttk.Label(left, text='非整除网格需启用重采样；统一尺寸对整图等比缩放。',
                                    style='Muted.TLabel')
         self.mode_hint.grid(row=7, column=0, sticky='w', pady=(7, 0))
 
@@ -237,7 +261,7 @@ class AtlasTrimApp:
         log_area.grid_remove()
 
         bottom = ttk.Frame(shell)
-        bottom.grid(row=4, column=0, sticky='ew', pady=(16, 0))
+        bottom.grid(row=4, column=0, sticky='ew', pady=(12, 0))
         self._control(ttk.Button(bottom, text='批量导出全部', style='Accent.TButton', command=self.export)).pack(side='left')
         self._control(ttk.Button(bottom, text='导出选中', command=lambda: self.export(selected=True))).pack(side='left', padx=8)
         self.cancel_button = ttk.Button(bottom, text='停止', command=self.stop_export, state='disabled')
@@ -246,7 +270,7 @@ class AtlasTrimApp:
         self.report_button = ttk.Button(bottom, text='查看处理清单', command=self.open_report, state='disabled')
         self.report_button.pack(side='right', padx=8)
         self.progress = ttk.Progressbar(shell, mode='determinate')
-        self.progress.grid(row=5, column=0, sticky='ew', pady=(12, 6))
+        self.progress.grid(row=5, column=0, sticky='ew', pady=(8, 6))
         ttk.Label(shell, textvariable=self.status, style='Muted.TLabel', wraplength=1300).grid(row=6, column=0, sticky='w')
 
     def toggle_log(self):
@@ -267,16 +291,25 @@ class AtlasTrimApp:
         columns, rows = self.grids.get(key, (5, 5))
         try:
             options = Options(columns, rows, int(self.padding.get()), int(self.threshold.get()),
-                              self.keep_center.get(), self.mode.get() == RESAMPLE)
+                              self.keep_center.get(), self.mode.get() == RESAMPLE,
+                              uniform_size=self.uniform_size.get(),
+                              target_width=int(self.target_width.get()) if self.uniform_size.get() else 1024,
+                              target_height=int(self.target_height.get()) if self.uniform_size.get() else 1024,
+                              resize_filter='nearest' if self.resize_mode.get() == PIXEL else 'smooth')
             options.validate()
             return options
         except (ValueError, tk.TclError) as error:
-            raise ValueError('留边和alpha阈值必须为整数') from error
+            raise ValueError('留边、alpha阈值和开启统一尺寸后的目标宽高必须为整数') from error
+
+    def _update_resize_controls(self):
+        for widget, enabled_state in self.resize_inputs:
+            widget.configure(state=enabled_state if self.uniform_size.get() and not self.busy else 'disabled')
 
     def _set_busy(self, name: str):
         self.busy = name
         for widget, state in self.controls:
             widget.configure(state='disabled' if name else state)
+        self._update_resize_controls()
         self.cancel_button.configure(state='normal' if name == 'export' else 'disabled')
 
     def choose_input(self):
@@ -388,6 +421,7 @@ class AtlasTrimApp:
     def _parameters_changed(self, *_):
         if self.busy:
             return
+        self._update_resize_controls()
         self._update_rows()
         self._schedule_preview()
 
@@ -455,10 +489,15 @@ class AtlasTrimApp:
         if result:
             self.original_label.configure(text='源像素参考' if self.mode.get() == RESAMPLE else '原始帧')
             plan = result.plan
-            mode = '重采样' if self.mode.get() == RESAMPLE else '严格复制'
-            self.plan_text.set(f'原帧 {plan.frame_width:g}×{plan.frame_height:g}  →  方形帧 {plan.side}×{plan.side}\n'
-                               f'图集 {result.atlas.width}×{result.atlas.height}  ·  {mode}  ·  统一偏移 ({-plan.crop_x:g}, {-plan.crop_y:g})'
-                               + ('\n' + '；'.join(result.warnings) if result.warnings else ''))
+            mode = '重采样裁剪' if self.mode.get() == RESAMPLE else '整数裁剪'
+            frame_width, frame_height = result.output_frame_size
+            resizing = f'  ·  整图{self.resize_mode.get()}缩放' if self.uniform_size.get() else ''
+            self.plan_text.set(f'原帧 {plan.frame_width:g}×{plan.frame_height:g}  →  裁剪帧 {plan.side}×{plan.side}'
+                               f'  →  输出帧 {frame_width:g}×{frame_height:g}\n'
+                               f'图集 {result.atlas.width}×{result.atlas.height}  ·  {mode}{resizing}'
+                               + ('\n内容触及原格边缘；详细帧号见处理记录。' if result.warnings else ''))
+            for warning in result.warnings:
+                self._log('预览提示 · ' + warning)
             self.slider.configure(to=max(1, len(result.frames) - 1))
             self.playing = True
             self.play_button.configure(text='暂停')
@@ -540,16 +579,25 @@ class AtlasTrimApp:
             if image:
                 box_width, box_height = image.width, image.height
                 x, y = (width - image.width * zoom) / 2, (height - image.height * zoom) / 2
-                if index == 0 and self.result:
+                if self.result:
                     plan = self.result.plan
-                    offset_x, offset_y = self.result.original_offsets[self.frame_index]
-                    x = width / 2 + (offset_x - plan.frame_width / 2) * zoom
-                    y = height / 2 + (offset_y - plan.frame_height / 2) * zoom
-                    box_width, box_height = plan.frame_width, plan.frame_height
+                    if index == 0:
+                        offset_x, offset_y = self.result.original_offsets[self.frame_index]
+                        box_width, box_height = plan.frame_width, plan.frame_height
+                    else:
+                        offset_x, offset_y = self.result.frame_offsets[self.frame_index]
+                        box_width, box_height = self.result.output_frame_size
+                    x = width / 2 + (offset_x - box_width / 2) * zoom
+                    y = height / 2 + (offset_y - box_height / 2) * zoom
                 view = image.transform((width, height), Image.Transform.AFFINE,
                                        (1 / zoom, 0, -x / zoom, 0, 1 / zoom, -y / zoom),
                                        Image.Resampling.NEAREST if zoom >= 1 else Image.Resampling.BILINEAR)
-                background.alpha_composite(view)
+                left = max(0, math.ceil((width - box_width * zoom) / 2 - .5))
+                top = max(0, math.ceil((height - box_height * zoom) / 2 - .5))
+                right = min(width, math.ceil((width + box_width * zoom) / 2 - .5))
+                bottom = min(height, math.ceil((height + box_height * zoom) / 2 - .5))
+                if right > left and bottom > top:
+                    background.alpha_composite(view.crop((left, top, right, bottom)), dest=(left, top))
                 ImageDraw.Draw(background).rectangle(((width - box_width * zoom) / 2, (height - box_height * zoom) / 2,
                                                      (width + box_width * zoom) / 2, (height + box_height * zoom) / 2), outline='#94a3b8')
             photo = ImageTk.PhotoImage(background)

@@ -2,24 +2,20 @@
 
 ## 目标
 
-开发可双击、离线运行的Windows 10/11 x64窗口EXE，按指定网格批量裁剪透明PNG序列帧图集，输出正方形帧并保留动画的帧间位置关系。
+将 AtlasTrim 1.1 工程完整提交到 GitHub，保留源码历史，并提供对应的 Windows EXE 下载。
 
 ## 已定
 
-- 初版输入、裁剪算法、中心选项、严格/重采样模式、预览、批量输出及验收标准已于2026-10-14获用户确认：[ADR 0001](docs/adr/0001-atlas-processing-design.md)。
-- 用户已授权开始开发；最终交付为可运行EXE。
+- 图集裁剪规则见 [ADR 0001](docs/adr/0001-atlas-processing-design.md)；整体等比缩放规则见 [ADR 0002](docs/adr/0002-uniform-atlas-size.md)。
+- 本轮用户已授权提交 GitHub；使用当前账号 Aendier，默认创建同名私有仓库，EXE 通过 Release 附件交付。
 
 ## 现状
 
-- `Origen/`有31张RGBA PNG，布局混合为5×5、4×4、4×3、6×5；核验和参考输出见ADR。
-- 按真实网格，8张可整数裁剪，23张严格模式将跳过，需要用户显式启用重采样。
-- 已交付便携单文件`dist/AtlasTrim.exe`及`dist/使用说明.md`，构建对应源码`a4591d9`。
-- 界面、同步预览、裁剪/重采样、目录扫描和非覆盖批量导出已完成。13项行为测试通过，Pyright为0错误、0警告。
-- 最终EXE真实素材验证：严格模式成功8/跳过23/失败0，重采样成功31/失败0，3张参考尺寸与ADR一致，原素材SHA-256未变。证据见`.artifacts/packaged/report.json`。
-- EXE在清除外部Python路径、设置无效PYTHONHOME后完成窗口扫描、预览、逐帧及导出，Pillow/numpy/tkinter均来自内嵌包。1050×700窗口预览和控件、记录展开操作通过。
-- 规范和需求两项独立审查均已复核通过，遗留发现为0。审查记录见`docs/REVIEW.md`，验证记录见`docs/VALIDATION.md`。
-- 本地Git基线为`fda2e02`；源码、使用说明、构建/验证脚本和测试已提交，原图和生成产物由`.gitignore`排除。
+- 1.1 已实现统一尺寸、最大宽高、平滑／像素切换及一致的预览、批量导出。
+- 2026-10-20 重新运行 23 项行为测试，全部通过；EXE、4 个运行源码和 requirements.txt 的 SHA-256 均与既有 1.1 构建记录一致，未重新构建 EXE。
+- 已整理源码、测试和文档的提交范围；素材、Output、构建产物和本地验证证据排除在 Git 之外。
+- 原有 31 张素材与 EXE 验证结果见 [验证记录](docs/VALIDATION.md)。
 
 ## 下一步
 
-用户可双击`dist/AtlasTrim.exe`开始使用，按使用说明设置混合网格；后续反馈从此已验收版本继续。
+提交本地更改，创建 Aendier/FrameByFrameAnimationProcessing 私有仓库并推送 main，上传 v1.1 的 EXE 和使用说明，核验远程内容。

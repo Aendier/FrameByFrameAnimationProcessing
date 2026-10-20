@@ -17,10 +17,13 @@ for path in sorted((ROOT / 'Origen').glob('*.png')):
     jobs.append({'file': path.name, 'options': {'columns': columns, 'rows': rows}})
 manifest = {'input_folder': str(ROOT / 'Origen'), 'gui_selected': 'ACHT_Frost.png',
             'gui_grid': [4, 4], 'screenshot': str(OUTPUT / 'interface.png'),
+            'gui_uniform_selected': 'ACHT_Avia.png', 'gui_uniform_grid': [5, 5],
             'expected_sizes': {'ACHT_Frost.png': [1412, 1412], 'ACHT_Yelena.png': [1564, 1564],
                                'ACHT_Jill.png': [1412, 1059]},
             'cases': [{'name': 'strict', 'jobs': jobs, 'expected': {'success': 8, 'skipped': 23, 'failed': 0}},
                       {'name': 'resampled', 'jobs': [dict(item, options=dict(item['options'], resample=True)) for item in jobs],
+                       'expected': {'success': 31, 'skipped': 0, 'failed': 0}},
+                      {'name': 'uniform', 'jobs': [dict(item, options=dict(item['options'], resample=True, uniform_size=True)) for item in jobs],
                        'expected': {'success': 31, 'skipped': 0, 'failed': 0}}]}
 path = OUTPUT / 'verification_manifest.json'
 path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')

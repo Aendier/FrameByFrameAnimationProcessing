@@ -1,4 +1,4 @@
-"""PNG -> uniformly cropped square-frame atlas. No UI or global settings."""
+"""PNG -> uniformly cropped atlas, optionally scaled as a complete image."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,6 +26,10 @@ class Options:
     threshold: int = 0
     keep_center: bool = False
     resample: bool = False
+    uniform_size: bool = False
+    target_width: int = 1024
+    target_height: int = 1024
+    resize_filter: str = 'smooth'
 
     def validate(self) -> None:
         if not 1 <= self.columns <= 4096 or not 1 <= self.rows <= 4096:
@@ -36,6 +40,11 @@ class Options:
             raise ProcessingSkipped('padding', '留边必须为0～4096像素')
         if not 0 <= self.threshold <= 255:
             raise ProcessingSkipped('threshold', 'alpha阈值必须为0～255')
+        if self.uniform_size:
+            if self.target_width < 1 or self.target_height < 1:
+                raise ProcessingSkipped('target_size', '统一尺寸的最大宽高必须为正整数')
+            if self.resize_filter not in ('smooth', 'nearest'):
+                raise ProcessingSkipped('resize_filter', '缩放方式必须为平滑或像素')
 
 
 @dataclass(frozen=True)
@@ -59,6 +68,25 @@ class ProcessedAtlas:
     source_size: tuple[int, int]
     warnings: list[str]
     metadata: dict
+    frame_offsets: list[tuple[float, float]]
+
+    @property
+    def output_frame_size(self) -> tuple[float, float]:
+        return self.atlas.width / self.plan.columns, self.atlas.height / self.plan.rows
+
+    @property
+    def output_scale(self) -> tuple[float, float]:
+        width, height = self.output_frame_size
+        return width / self.plan.side, height / self.plan.side
+
+
+def output_size(width: int, height: int, options: Options) -> tuple[int, int]:
+    """Fit the complete atlas; do not round its dimensions to grid multiples."""
+    if not options.uniform_size:
+        return width, height
+    if options.target_width * height <= options.target_height * width:
+        return options.target_width, max(1, (height * options.target_width + width // 2) // width)
+    return max(1, (width * options.target_height + height // 2) // height), options.target_height
 
 
 def check_geometry(width: int, height: int, options: Options) -> None:
@@ -80,13 +108,14 @@ def has_transparency(image: Image.Image) -> bool:
 
 
 def _original_frames(source: Image.Image, options: Options):
-    width, height = source.width / options.columns, source.height / options.rows
     originals, offsets = [], []
     for row in range(options.rows):
         for column in range(options.columns):
-            x, y = column * width, row * height
-            left, top = math.floor(x), math.floor(y)
-            originals.append(source.crop((left, top, math.ceil(x + width), math.ceil(y + height))))
+            x, y = column * source.width / options.columns, row * source.height / options.rows
+            left, top = column * source.width // options.columns, row * source.height // options.rows
+            right = ((column + 1) * source.width + options.columns - 1) // options.columns
+            bottom = ((row + 1) * source.height + options.rows - 1) // options.rows
+            originals.append(source.crop((left, top, right, bottom)))
             offsets.append((left - x, top - y))
     return originals, offsets
 
@@ -235,5 +264,17 @@ def process_atlas(path: str | Path, options: Options) -> ProcessedAtlas:
     for index, frame in enumerate(frames):
         atlas.paste(frame, ((index % options.columns) * plan.side,
                             (index // options.columns) * plan.side))
+    size = output_size(*atlas.size, options)
+    if size[0] * size[1] > MAX_OUTPUT_PIXELS:
+        raise ProcessingSkipped('size', '统一尺寸输出超过6400万像素；请减小目标宽高')
+    frame_offsets = [(0.0, 0.0)] * len(frames)
+    if size != atlas.size:
+        # Resize the actual assembled image. RGBA smooth resize uses premultiplied
+        # alpha, so hidden RGB in transparent pixels cannot darken its edges.
+        atlas = atlas.resize(size, Image.Resampling.NEAREST if options.resize_filter == 'nearest'
+                             else Image.Resampling.LANCZOS)
+        # Keep raw integer ROIs and their continuous offsets for faithful playback
+        # of fractional output cells, rather than independently rounding each cell.
+        frames, frame_offsets = _original_frames(atlas, options)
     return ProcessedAtlas(atlas, originals, original_offsets, frames, plan,
-                          (width, height), warnings, metadata)
+                          (width, height), warnings, metadata, frame_offsets)
