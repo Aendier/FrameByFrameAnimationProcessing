@@ -2,7 +2,7 @@
 
 ## 2026-10-20：GitHub 归档
 
-- 已将源码、测试、文档和完整本地提交历史推送至 [私有仓库](https://github.com/Aendier/FrameByFrameAnimationProcessing) 的 main 分支。
+- 已将源码、测试、文档和完整本地提交历史推送至 [GitHub 仓库](https://github.com/Aendier/FrameByFrameAnimationProcessing) 的 main 分支。
 - 重新运行全部 23 项行为测试，全部通过；未修改运行代码或重新构建 EXE。
 - 本地 EXE、atlas_trim.py、atlas_processor.py、atlas_batch.py、verify_runtime.py 和 requirements.txt 的 SHA-256 均与既有 1.1 构建记录一致。
 - [v1.1 Release](https://github.com/Aendier/FrameByFrameAnimationProcessing/releases/tag/v1.1) 对应源码提交 `0500fb7`，包含 AtlasTrim.exe、Usage.md（使用说明）和 SHA256SUMS.txt。三个附件的 GitHub SHA-256 均与本地文件一致，大小匹配，上传状态均为 uploaded。
